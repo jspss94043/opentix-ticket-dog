@@ -3,7 +3,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
 import os
-import re
 import sys
 import urllib.request
 
@@ -15,34 +14,19 @@ STATE_FILE = Path("cloud_state.json")
 
 EXCLUDED_WORDS = [
     "輪椅",
-    "輪椅陪同席",
-    "多元友善",
-    "多元友善席",
-    "多元友善陪同席",
-    "陪同席",
+    "輪陪",
+    "友善",
+    "友陪",
+    "陪同",
     "身障",
     "身心障礙",
-]
-
-# 阿格麗希台北場的正式票價
-PRICE_TIERS = [
-    1200,
-    1800,
-    2400,
-    3000,
-    3800,
-    4200,
-    4800,
-    5800,
-    6800,
-    8800,
 ]
 
 
 def load_state():
     default = {
         "last_status": None,
-        "last_inventory": {},
+        "last_general_seat_ids": [],
     }
 
     if not STATE_FILE.exists():
@@ -112,259 +96,314 @@ def send_line(message):
     print("📱 LINE 通知已送出")
 
 
-def clean_price(text):
-    """
-    從一小段 OPENTIX 文字中找正式票價。
-    只接受這場演出的既定票價，
-    避免把剩餘張數、日期之類誤判成價格。
-    """
-
-    numbers = re.findall(
-        r"\d{1,2}(?:,\d{3})|\d{4}",
-        text,
-    )
-
-    for number in numbers:
-        value = int(
-            number.replace(",", "")
+def find_taipei_buy_button(page):
+    for button_name in [
+        "自行選位",
+        "電腦配位",
+    ]:
+        locator = page.get_by_text(
+            button_name,
+            exact=True,
         )
 
-        if value in PRICE_TIERS:
-            return value
+        for i in range(locator.count()):
+            candidate = locator.nth(i)
+
+            if not candidate.is_visible():
+                continue
+
+            belongs_to_taipei = candidate.evaluate(
+                """el => {
+                    let node = el;
+
+                    while (
+                        node &&
+                        node !== document.body
+                    ) {
+                        const text =
+                            node.innerText || "";
+
+                        if (
+                            text.includes("2026/11/12") &&
+                            text.includes("國家音樂廳")
+                        ) {
+                            return true;
+                        }
+
+                        node = node.parentElement;
+                    }
+
+                    return false;
+                }"""
+            )
+
+            if belongs_to_taipei:
+                return candidate
 
     return None
 
 
-def find_ticket_label(context_lines):
-    """
-    優先找身障／友善票的名稱。
-    找不到時，再找看起來像票區名稱的文字。
-    """
+def extract_taipei_status(page):
+    return page.evaluate(
+        """() => {
+            const candidates =
+                [...document.querySelectorAll(
+                    "body *"
+                )].filter(el => {
+                    const text =
+                        el.innerText || "";
 
-    # 從距離「剩：X」最近的地方往前找
-    for line in reversed(context_lines):
-        if any(
-            word in line
-            for word in EXCLUDED_WORDS
-        ):
-            return line
+                    return (
+                        text.includes("2026/11/12") &&
+                        text.includes("國家音樂廳") &&
+                        (
+                            text.includes("完售") ||
+                            text.includes("自行選位") ||
+                            text.includes("電腦配位")
+                        )
+                    );
+                });
 
-    for line in reversed(context_lines):
-        if (
-            "元區" in line
-            or "票" in line
-            or "席" in line
-        ):
-            # 避免把「剩：2」自己當成票名
-            if not re.search(
-                r"剩\s*[:：]?\s*\d+",
-                line,
-            ):
-                return line
+            candidates.sort(
+                (a, b) =>
+                    (a.innerText || "").length -
+                    (b.innerText || "").length
+            );
 
-    return "一般票"
-
-
-def parse_ticket_inventory(text):
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
-    normal_tickets = []
-    excluded_tickets = []
-
-    for i, line in enumerate(lines):
-
-        # 支援幾種可能出現的格式：
-        # 剩：2
-        # 剩: 2
-        # 剩 2
-        # 剩餘：2
-        match = re.search(
-            r"(?:剩|剩餘)\s*[:：]?\s*(\d+)",
-            line,
-        )
-
-        if not match:
-            continue
-
-        remaining = int(
-            match.group(1)
-        )
-
-        if remaining <= 0:
-            continue
-
-        # 不再只看上一行。
-        # 往前看最多 8 行、往後看 2 行。
-        start = max(
-            0,
-            i - 8,
-        )
-
-        end = min(
-            len(lines),
-            i + 3,
-        )
-
-        context_lines = lines[
-            start:end
-        ]
-
-        context_text = "\n".join(
-            context_lines
-        )
-
-        is_excluded = any(
-            word in context_text
-            for word in EXCLUDED_WORDS
-        )
-
-        price = clean_price(
-            context_text
-        )
-
-        ticket_name = find_ticket_label(
-            context_lines
-        )
-
-        ticket = {
-            "name": ticket_name,
-            "price": price,
-            "remaining": remaining,
-        }
-
-        if is_excluded:
-            excluded_tickets.append(
-                ticket
-            )
-        else:
-            normal_tickets.append(
-                ticket
-            )
-
-    return (
-        normal_tickets,
-        excluded_tickets,
+            return candidates.length
+                ? candidates[0].innerText
+                : "";
+        }"""
     )
 
 
-def inventory_dict(tickets):
-    result = {}
+def read_enabled_seats(page):
+    return page.evaluate(
+        """() => {
 
-    for ticket in tickets:
+            function rgbKey(value) {
+                if (!value) return "";
+
+                const match = value.match(
+                    /rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/
+                );
+
+                if (!match) {
+                    return value
+                        .trim()
+                        .toLowerCase();
+                }
+
+                return (
+                    `rgb(${match[1]}, ${match[2]}, ${match[3]})`
+                );
+            }
+
+
+            // 建立「顏色 → 票價」對照表
+            const priceByColor = {};
+
+            for (
+                const row
+                of document.querySelectorAll(
+                    ".section-wrapper"
+                )
+            ) {
+                const swatch =
+                    row.querySelector(
+                        ".circle--status"
+                    );
+
+                if (!swatch) {
+                    continue;
+                }
+
+                const text =
+                    (row.innerText || "")
+                        .replace(/\\s+/g, " ")
+                        .trim();
+
+                const priceMatch =
+                    text.match(
+                        /[＄$]\\s*([\\d,]+)/
+                    );
+
+                if (!priceMatch) {
+                    continue;
+                }
+
+                const price =
+                    parseInt(
+                        priceMatch[1]
+                            .replace(/,/g, ""),
+                        10
+                    );
+
+                const color =
+                    rgbKey(
+                        getComputedStyle(
+                            swatch
+                        ).backgroundColor
+                    );
+
+                if (!color) {
+                    continue;
+                }
+
+                priceByColor[color] = {
+                    price,
+                    label: text,
+                };
+            }
+
+
+            // 只找現在真的可以選的座位
+            const seats = [];
+
+            for (
+                const seat
+                of document.querySelectorAll(
+                    'circle.seat[enabled="true"]'
+                )
+            ) {
+                const id =
+                    seat.getAttribute(
+                        "id"
+                    ) || "";
+
+                const fill =
+                    rgbKey(
+                        getComputedStyle(
+                            seat
+                        ).fill ||
+                        seat.style.fill ||
+                        seat.getAttribute(
+                            "fill"
+                        ) ||
+                        ""
+                    );
+
+                const legend =
+                    priceByColor[
+                        fill
+                    ] || null;
+
+                seats.push({
+                    id,
+                    fill,
+                    price:
+                        legend
+                            ? legend.price
+                            : null,
+                    legend:
+                        legend
+                            ? legend.label
+                            : "",
+                });
+            }
+
+            return {
+                priceByColor,
+                seats,
+            };
+        }"""
+    )
+
+
+def is_excluded_seat(seat_id):
+    return any(
+        word in seat_id
+        for word in EXCLUDED_WORDS
+    )
+
+
+def summarize_prices(general_seats):
+    counts = {}
+
+    for seat in general_seats:
+        price = seat.get(
+            "price"
+        )
+
         key = (
-            f"{ticket['name']}|"
-            f"{ticket['price']}"
+            str(price)
+            if price is not None
+            else "unknown"
         )
 
-        result[key] = (
-            ticket["remaining"]
+        counts[key] = (
+            counts.get(
+                key,
+                0,
+            ) + 1
         )
 
-    return result
+    return counts
 
 
-def price_text(price):
-    if price is None:
-        return "票價未辨認"
+def line_message(general_seats):
+    price_counts = (
+        summarize_prices(
+            general_seats
+        )
+    )
 
-    return f"NT${price:,}"
+    known_prices = sorted(
+        [
+            int(price)
+            for price
+            in price_counts
+            if price != "unknown"
+        ],
+        reverse=True,
+    )
 
-
-def ticket_message(tickets):
     lines = [
         "🚨🐕 汪汪汪！阿格麗希獵犬聞到票的味道了！",
         "",
-        "🎹 2026 瑪莎．阿格麗希",
-        "📍 台北｜國家音樂廳",
-        "🕢 2026/11/12 19:30",
+        "瑪莎．阿格麗希｜2026 藝文饗宴",
+        "📍 台北・國家音樂廳",
+        "11/12（四）19:30",
         "",
     ]
 
-    for ticket in tickets:
+    for price in known_prices:
         lines.append(
-            "🎟️ "
-            f"{price_text(ticket['price'])}"
-            f"｜{ticket['name']}"
-            f"｜剩 {ticket['remaining']} 張"
+            f"🎟️ {price}"
+            f"｜{price_counts[str(price)]} 張"
+        )
+
+    unknown_count = (
+        price_counts.get(
+            "unknown",
+            0,
+        )
+    )
+
+    if unknown_count:
+        lines.append(
+            "🎟️ 票價待確認"
+            f"｜{unknown_count} 張"
         )
 
     lines.extend([
+        "",
+        f"一般可購買座位：{len(general_seats)} 張",
         "",
         "快去 OPENTIX 搶票！",
         URL,
     ])
 
-    return "\n".join(lines)
-
-
-def unclear_message():
-    return "\n".join([
-        "⚠️🐕 阿格麗希獵犬發現台北場有購票入口，",
-        "但 OPENTIX 目前仍無法清楚辨認票種。",
-        "",
-        "可能有可購買座位，建議立刻進 OPENTIX 看看。",
-        URL,
-    ])
-
-
-def print_ticket_debug(
-    normal_tickets,
-    excluded_tickets,
-):
-    print("")
-    print("========== 🐕 票況辨識結果 ==========")
-
-    if normal_tickets:
-        print("✅ 一般票：")
-
-        for ticket in normal_tickets:
-            print(
-                "  ",
-                price_text(
-                    ticket["price"]
-                ),
-                "|",
-                ticket["name"],
-                "| 剩",
-                ticket["remaining"],
-            )
-
-    if excluded_tickets:
-        print("🤐 排除票種：")
-
-        for ticket in excluded_tickets:
-            print(
-                "  ",
-                price_text(
-                    ticket["price"]
-                ),
-                "|",
-                ticket["name"],
-                "| 剩",
-                ticket["remaining"],
-            )
-
-    if (
-        not normal_tickets
-        and not excluded_tickets
-    ):
-        print(
-            "⚠️ 沒有成功辨認任何票種。"
-        )
-
-    print(
-        "===================================="
+    return "\n".join(
+        lines
     )
-    print("")
 
 
 def check_tickets():
     now_text = datetime.now(
-        ZoneInfo("Asia/Taipei")
+        ZoneInfo(
+            "Asia/Taipei"
+        )
     ).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -372,22 +411,27 @@ def check_tickets():
     print(
         "🐕 雲端阿格麗希退票獵犬開始巡邏"
     )
+
     print(
         "檢查時間：",
         now_text,
     )
+
     print(
         "目標：2026/11/12 台北國家音樂廳"
     )
 
     with sync_playwright() as p:
-
         browser = p.chromium.launch(
             headless=True
         )
 
         context = browser.new_context(
-            locale="zh-TW"
+            locale="zh-TW",
+            viewport={
+                "width": 1440,
+                "height": 1200,
+            },
         )
 
         page = context.new_page()
@@ -402,239 +446,212 @@ def check_tickets():
             5000
         )
 
-        buy_button = None
-
-        for button_name in [
-            "自行選位",
-            "電腦配位",
-        ]:
-
-            locator = page.get_by_text(
-                button_name,
-                exact=True,
+        buy_button = (
+            find_taipei_buy_button(
+                page
             )
-
-            for i in range(
-                locator.count()
-            ):
-
-                candidate = (
-                    locator.nth(i)
-                )
-
-                if not (
-                    candidate.is_visible()
-                ):
-                    continue
-
-                belongs_to_taipei = (
-                    candidate.evaluate(
-                        """el => {
-                            let node = el;
-
-                            while (
-                                node &&
-                                node !== document.body
-                            ) {
-                                const text =
-                                    node.innerText || "";
-
-                                if (
-                                    text.includes(
-                                        "2026/11/12"
-                                    ) &&
-                                    text.includes(
-                                        "國家音樂廳"
-                                    )
-                                ) {
-                                    return true;
-                                }
-
-                                node =
-                                    node.parentElement;
-                            }
-
-                            return false;
-                        }"""
-                    )
-                )
-
-                if belongs_to_taipei:
-                    buy_button = (
-                        candidate
-                    )
-                    break
-
-            if buy_button is not None:
-                break
-
-        taipei_status = page.evaluate(
-            """() => {
-                const candidates =
-                    [...document.querySelectorAll(
-                        "body *"
-                    )].filter(el => {
-                        const text =
-                            el.innerText || "";
-
-                        return (
-                            text.includes(
-                                "2026/11/12"
-                            ) &&
-                            text.includes(
-                                "國家音樂廳"
-                            ) &&
-                            (
-                                text.includes(
-                                    "完售"
-                                ) ||
-                                text.includes(
-                                    "自行選位"
-                                ) ||
-                                text.includes(
-                                    "電腦配位"
-                                )
-                            )
-                        );
-                    });
-
-                candidates.sort(
-                    (a, b) =>
-                        (a.innerText || "").length -
-                        (b.innerText || "").length
-                );
-
-                return candidates.length
-                    ? candidates[0].innerText
-                    : "";
-            }"""
         )
 
-        normal_tickets = []
-        excluded_tickets = []
-        status = "unknown"
+        taipei_status = (
+            extract_taipei_status(
+                page
+            )
+        )
 
         if buy_button is None:
+            browser.close()
 
-            if "完售" in taipei_status:
-                status = "sold_out"
-
+            if (
+                "完售"
+                in taipei_status
+            ):
                 print(
                     "🥺🐕 台北場目前仍然完售。"
                 )
 
-            else:
-                status = "unknown"
-
-                print(
-                    "⚠️ 台北場狀態無法判斷。"
+                return (
+                    "sold_out",
+                    [],
+                    [],
                 )
-
-        else:
 
             print(
-                "👃 獵犬發現台北場購票入口，正在聞票……"
+                "⚠️ 台北場狀態無法判斷。"
             )
 
-            old_page_count = len(
-                context.pages
+            return (
+                "unknown",
+                [],
+                [],
             )
 
-            buy_button.click()
+        print(
+            "👃 找到台北場購票入口，"
+            "正在檢查可選座位……"
+        )
 
-            page.wait_for_timeout(
-                5000
+        old_page_count = len(
+            context.pages
+        )
+
+        buy_button.click()
+
+        page.wait_for_timeout(
+            5000
+        )
+
+        if (
+            len(context.pages)
+            > old_page_count
+        ):
+            page = context.pages[-1]
+
+        page.wait_for_timeout(
+            5000
+        )
+
+        seat_data = (
+            read_enabled_seats(
+                page
             )
+        )
 
-            if (
-                len(context.pages)
-                > old_page_count
+        enabled_seats = (
+            seat_data[
+                "seats"
+            ]
+        )
+
+        general_seats = []
+        excluded_seats = []
+
+        for seat in enabled_seats:
+            if is_excluded_seat(
+                seat["id"]
             ):
-                page = (
-                    context.pages[-1]
+                excluded_seats.append(
+                    seat
                 )
-
-            page.wait_for_timeout(
-                3000
-            )
-
-            ticket_text = (
-                page.locator(
-                    "body"
-                ).inner_text()
-            )
-
-            # 存一份真正的購票頁文字，
-            # 以後如果 OPENTIX 又改格式，
-            # 我們有東西可以檢查。
-            Path(
-                "debug_ticket_page.txt"
-            ).write_text(
-                ticket_text,
-                encoding="utf-8",
-            )
-
-            (
-                normal_tickets,
-                excluded_tickets,
-            ) = parse_ticket_inventory(
-                ticket_text
-            )
-
-            print_ticket_debug(
-                normal_tickets,
-                excluded_tickets,
-            )
-
-            if normal_tickets:
-
-                status = "general"
-
-                print(
-                    "🚨🐕 發現可供一般觀眾購買的票！"
-                )
-
-            elif excluded_tickets:
-
-                status = (
-                    "excluded_only"
-                )
-
-                print(
-                    "🤐 目前辨認到的只有身障／"
-                    "多元友善／陪同相關座位。"
-                )
-
-                print(
-                    "🐕 LINE 保持安靜。"
-                )
-
             else:
-
-                status = (
-                    "unclear_available"
+                general_seats.append(
+                    seat
                 )
 
+        print("")
+        print(
+            "========== 🐕 座位結果 =========="
+        )
+
+        print(
+            "目前可選座位總數：",
+            len(
+                enabled_seats
+            ),
+        )
+
+        print(
+            "排除友善／輪椅相關：",
+            len(
+                excluded_seats
+            ),
+        )
+
+        print(
+            "一般可購買座位：",
+            len(
+                general_seats
+            ),
+        )
+
+        if excluded_seats:
+            print("")
+            print(
+                "🤐 已排除的座位："
+            )
+
+            for seat in (
+                excluded_seats
+            ):
                 print(
-                    "⚠️ 有購票入口，"
-                    "但暫時仍無法辨認票種。"
+                    "  ",
+                    seat["id"],
+                    "|",
+                    seat["price"]
+                    if seat[
+                        "price"
+                    ] is not None
+                    else "票價未辨認",
                 )
+
+        if general_seats:
+            print("")
+            print(
+                "🚨 一般可購買座位："
+            )
+
+            for seat in (
+                general_seats
+            ):
+                print(
+                    "  ",
+                    seat["id"],
+                    "|",
+                    seat["price"]
+                    if seat[
+                        "price"
+                    ] is not None
+                    else "票價未辨認",
+                )
+
+        print(
+            "================================"
+        )
+
+        print("")
 
         browser.close()
 
-    return (
-        status,
-        normal_tickets,
-    )
+        if general_seats:
+            return (
+                "general",
+                general_seats,
+                excluded_seats,
+            )
+
+        if excluded_seats:
+            return (
+                "excluded_only",
+                [],
+                excluded_seats,
+            )
+
+        return (
+            "unclear_available",
+            [],
+            [],
+        )
 
 
 def main():
-
+    # 之後如果要看 LINE 版型，
+    # 可以手動用這個模式測試，
+    # 不需要真的等到退票。
     if "--test-line" in sys.argv:
-
         send_line(
-            "🐕✅ 演出退票獵犬 LINE 測試成功！\n"
-            "雲端狗狗已經會透過 LINE 說話了。"
+            "\n".join([
+                "🚨🐕 汪汪汪！阿格麗希獵犬聞到票的味道了！",
+                "",
+                "瑪莎．阿格麗希｜2026 藝文饗宴",
+                "📍 台北・國家音樂廳",
+                "11/12（四）19:30",
+                "",
+                "🎟️ 5800｜2 張",
+                "🎟️ 4800｜1 張",
+                "",
+                "一般可購買座位：3 張",
+                "",
+                "快去 OPENTIX 搶票！",
+            ])
         )
 
         return
@@ -643,51 +660,42 @@ def main():
 
     (
         status,
-        normal_tickets,
+        general_seats,
+        excluded_seats,
     ) = check_tickets()
 
-    current_inventory = (
-        inventory_dict(
-            normal_tickets
-        )
+    # 雖然 LINE 不顯示座號，
+    # 但程式仍記住真正的座位 ID。
+    # 如果同價位「一張消失、一張新出現」，
+    # 即使張數沒變，也能重新通知你。
+    current_general_ids = sorted(
+        seat["id"]
+        for seat
+        in general_seats
     )
 
-    previous_status = state.get(
-        "last_status"
-    )
-
-    previous_inventory = (
+    previous_general_ids = sorted(
         state.get(
-            "last_inventory",
-            {},
+            "last_general_seat_ids",
+            [],
         )
     )
 
-    inventory_changed = (
-        current_inventory
-        != previous_inventory
-    )
-
-    status_changed = (
-        status
-        != previous_status
+    general_changed = (
+        current_general_ids
+        != previous_general_ids
     )
 
     if status == "general":
 
-        if (
-            status_changed
-            or inventory_changed
-        ):
-
+        if general_changed:
             send_line(
-                ticket_message(
-                    normal_tickets
+                line_message(
+                    general_seats
                 )
             )
 
         else:
-
             print(
                 "🐕 同一批一般票仍在，"
                 "這輪不重複 LINE 通知。"
@@ -695,36 +703,40 @@ def main():
 
     elif (
         status
-        == "unclear_available"
+        == "excluded_only"
     ):
-
-        if status_changed:
-
-            send_line(
-                unclear_message()
-            )
-
-        else:
-
-            print(
-                "🐕 購票入口狀態沒有變化，"
-                "這輪不重複 LINE 通知。"
-            )
-
-    else:
-
         print(
-            "🤫 這輪沒有一般票，"
+            "🤫 目前只有友善／輪椅相關座位，"
             "LINE 保持安靜。"
         )
 
-    state["last_status"] = (
+    elif (
         status
-    )
+        == "sold_out"
+    ):
+        print(
+            "🤫 台北場完售，"
+            "LINE 保持安靜。"
+        )
 
-    state["last_inventory"] = (
-        current_inventory
-    )
+    else:
+        print(
+            "⚠️ 有購票入口，"
+            "但沒有辨認到可選座位。"
+        )
+
+        print(
+            "為避免誤報，"
+            "這輪先不傳 LINE。"
+        )
+
+    state[
+        "last_status"
+    ] = status
+
+    state[
+        "last_general_seat_ids"
+    ] = current_general_ids
 
     save_state(
         state
