@@ -1,0 +1,49 @@
+name: Seat Probe Dog
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get dog files
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Playwright and Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Probe OPENTIX seats
+        run: |
+          python -m py_compile seat_probe.py
+          python seat_probe.py
+
+      - name: Save probe results
+        if: always()
+        run: |
+          git config user.name "opentix-ticket-dog"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add seat_probe_result.json 2>/dev/null || true
+          git add seat_probe_page.html 2>/dev/null || true
+          git add seat_probe_text.txt 2>/dev/null || true
+          git add seat_probe_page.png 2>/dev/null || true
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Save seat probe results"
+            git push
+          else
+            echo "🐕 沒有新的座位偵測資料。"
+          fi
