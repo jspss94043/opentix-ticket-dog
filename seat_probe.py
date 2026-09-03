@@ -26,44 +26,35 @@ def find_taipei_buy_button(page):
             exact=True,
         )
 
-        for i in range(
-            locator.count()
-        ):
+        for i in range(locator.count()):
             candidate = locator.nth(i)
 
             if not candidate.is_visible():
                 continue
 
-            belongs_to_taipei = (
-                candidate.evaluate(
-                    """el => {
-                        let node = el;
+            belongs_to_taipei = candidate.evaluate(
+                """el => {
+                    let node = el;
 
-                        while (
-                            node &&
-                            node !== document.body
+                    while (
+                        node &&
+                        node !== document.body
+                    ) {
+                        const text =
+                            node.innerText || "";
+
+                        if (
+                            text.includes("2026/11/12") &&
+                            text.includes("國家音樂廳")
                         ) {
-                            const text =
-                                node.innerText || "";
-
-                            if (
-                                text.includes(
-                                    "2026/11/12"
-                                ) &&
-                                text.includes(
-                                    "國家音樂廳"
-                                )
-                            ) {
-                                return true;
-                            }
-
-                            node =
-                                node.parentElement;
+                            return true;
                         }
 
-                        return false;
-                    }"""
-                )
+                        node = node.parentElement;
+                    }
+
+                    return false;
+                }"""
             )
 
             if belongs_to_taipei:
@@ -79,16 +70,9 @@ def main():
         "%Y-%m-%d %H:%M:%S"
     )
 
-    print(
-        "🐕🔬 座位偵探狗開始工作"
-    )
-    print(
-        "檢查時間：",
-        now_text,
-    )
-    print(
-        "目標：2026/11/12 台北國家音樂廳"
-    )
+    print("🐕🔬 座位偵探狗開始工作")
+    print("檢查時間：", now_text)
+    print("目標：2026/11/12 台北國家音樂廳")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -111,14 +95,10 @@ def main():
             timeout=60000,
         )
 
-        page.wait_for_timeout(
-            5000
-        )
+        page.wait_for_timeout(5000)
 
-        buy_button = (
-            find_taipei_buy_button(
-                page
-            )
+        buy_button = find_taipei_buy_button(
+            page
         )
 
         if buy_button is None:
@@ -129,8 +109,7 @@ def main():
             return
 
         print(
-            "👃 找到台北場購票入口，"
-            "準備進入座位圖。"
+            "👃 找到台北場購票入口，準備進入座位圖。"
         )
 
         old_page_count = len(
@@ -139,33 +118,21 @@ def main():
 
         buy_button.click()
 
-        page.wait_for_timeout(
-            5000
-        )
+        page.wait_for_timeout(5000)
 
-        if (
-            len(context.pages)
-            > old_page_count
-        ):
+        if len(context.pages) > old_page_count:
             page = context.pages[-1]
 
-        page.wait_for_timeout(
-            5000
-        )
+        page.wait_for_timeout(5000)
 
         print(
             "目前頁面：",
             page.url,
         )
 
-        # ---------------------------------
         # 1. 保存最原始的頁面資料
-        # ---------------------------------
-
         body_text = (
-            page.locator(
-                "body"
-            ).inner_text()
+            page.locator("body").inner_text()
         )
 
         Path(
@@ -187,22 +154,15 @@ def main():
             full_page=True,
         )
 
-        # ---------------------------------
         # 2. 深入檢查 DOM
-        # ---------------------------------
-
         probe_result = page.evaluate(
             """() => {
 
                 function attrsOf(el) {
                     const result = {};
 
-                    for (
-                        const attr
-                        of [...el.attributes]
-                    ) {
-                        result[attr.name] =
-                            attr.value;
+                    for (const attr of [...el.attributes]) {
+                        result[attr.name] = attr.value;
                     }
 
                     return result;
@@ -215,16 +175,10 @@ def main():
                         el.textContent ||
                         ""
                     )
-                        .replace(
-                            /\\s+/g,
-                            " "
-                        )
+                        .replace(/\\s+/g, " ")
                         .trim();
 
-                    return value.slice(
-                        0,
-                        300
-                    );
+                    return value.slice(0, 300);
                 }
 
 
@@ -233,14 +187,10 @@ def main():
                         el.getBoundingClientRect();
 
                     return {
-                        x:
-                            Math.round(r.x),
-                        y:
-                            Math.round(r.y),
-                        width:
-                            Math.round(r.width),
-                        height:
-                            Math.round(r.height),
+                        x: Math.round(r.x),
+                        y: Math.round(r.y),
+                        width: Math.round(r.width),
+                        height: Math.round(r.height),
                     };
                 }
 
@@ -307,10 +257,7 @@ def main():
                 const candidates = [];
 
 
-                for (
-                    const el
-                    of all
-                ) {
+                for (const el of all) {
                     const tag =
                         el.tagName.toLowerCase();
 
@@ -431,8 +378,8 @@ def main():
                         continue;
                     }
 
-                    # 只記錄目前真正有尺寸的元素，
-                    # 以及有重要座位文字的元素。
+                    // 只記錄目前真正有尺寸的元素，
+                    // 以及有重要座位文字的元素。
                     if (
                         rect.width <= 0 &&
                         rect.height <= 0 &&
@@ -471,11 +418,8 @@ def main():
                 }
 
 
-                # --------------------------
-                # 專門尋找：
-                # 輪椅席／輪陪席／友善席／友陪席
-                # --------------------------
-
+                // 專門尋找：
+                // 輪椅席／輪陪席／友善席／友陪席
                 const specialSeatWords = [
                     "輪椅席",
                     "輪陪席",
@@ -490,10 +434,7 @@ def main():
                 const specialLabels = [];
 
 
-                for (
-                    const el
-                    of all
-                ) {
+                for (const el of all) {
                     const text =
                         shortText(el);
 
@@ -527,10 +468,7 @@ def main():
                 }
 
 
-                # --------------------------
-                # 看看是不是 Canvas 座位圖
-                # --------------------------
-
+                // 看看是不是 Canvas 座位圖
                 const canvases = [
                     ...document.querySelectorAll(
                         "canvas"
@@ -555,10 +493,7 @@ def main():
                 );
 
 
-                # --------------------------
-                # 看看是不是 SVG 座位圖
-                # --------------------------
-
+                // 看看是不是 SVG 座位圖
                 const svgs = [
                     ...document.querySelectorAll(
                         "svg"
@@ -621,10 +556,7 @@ def main():
             encoding="utf-8",
         )
 
-        # ---------------------------------
         # 3. GitHub log 顯示摘要
-        # ---------------------------------
-
         print("")
         print(
             "========== 🐕🔬 座位偵測摘要 =========="
