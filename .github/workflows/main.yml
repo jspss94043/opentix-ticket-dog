@@ -2,11 +2,13 @@ name: OPENTIX Ticket Dog
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "3-59/5 * * * *"
 
 permissions:
   contents: write
+
+concurrency:
+  group: opentix-ticket-dog
+  cancel-in-progress: false
 
 jobs:
   patrol:
