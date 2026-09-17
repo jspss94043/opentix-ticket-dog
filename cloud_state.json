@@ -1,7 +1,5 @@
 {
-  "last_status": "general",
-  "last_general_seat_ids": [
-    "4樓-5-7"
-  ],
+  "last_status": "sold_out",
+  "last_general_seat_ids": [],
   "last_inventory": {}
 }
