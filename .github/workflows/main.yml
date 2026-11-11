@@ -35,8 +35,11 @@ jobs:
 
       - name: Remember dog state
         if: always()
-        working-directory: ${{ github.workspace }}
         run: |
+          echo "🐕 Workspace: $GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name "opentix-ticket-dog"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
