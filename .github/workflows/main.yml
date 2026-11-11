@@ -35,6 +35,7 @@ jobs:
 
       - name: Remember dog state
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |
           git config user.name "opentix-ticket-dog"
           git config user.email "github-actions[bot]@users.noreply.github.com"
