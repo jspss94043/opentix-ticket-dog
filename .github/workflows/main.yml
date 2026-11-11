@@ -15,30 +15,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 4
 
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.65.0-noble
+
     steps:
       - name: Get dog files
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Fix Ubuntu mirror
+      - name: Install Playwright Python package
         run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' /etc/apt/apt-mirrors.txt
-            echo "🐕 已避開 Azure Ubuntu mirror"
-            cat /etc/apt/apt-mirrors.txt
-          else
-            echo "🐕 找不到 apt-mirrors.txt，跳過 mirror 調整"
-          fi
-
-      - name: Install Playwright and Chromium
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
+          pip install playwright==1.65.0
 
       - name: Patrol OPENTIX
         env:
